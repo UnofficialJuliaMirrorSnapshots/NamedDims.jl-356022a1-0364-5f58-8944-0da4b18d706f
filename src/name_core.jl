@@ -215,6 +215,26 @@ function unify_names_longest(names_a, names_b)
     return compile_time_return_hack(ret)
 end
 
+unify_names_shortest(names, ::Tuple{}) = ()
+unify_names_shortest(::Tuple{}, names) = ()
+unify_names_shortest(::Tuple{}, ::Tuple{}) = ()
+function unify_names_shortest(names_a, names_b)
+    # 0 Allocations: @btime (()-> unify_names_shortest((:a,:b), (:a,)))()
+
+    length(names_a) == length(names_b) && return unify_names(names_a, names_b)
+    long, short = length(names_a) > length(names_b) ? (names_a, names_b) : (names_b, names_a)
+    ret = ntuple(length(short)) do ii
+        a = getfield(long, ii)
+        b = getfield(short, ii)
+        a === :_ && return b
+        b === :_ && return a
+        a === b && return a
+        return false  # mismatch occured, we mark this with a nonSymbol result
+    end
+    ret isa Tuple{Vararg{Symbol}} || incompatible_dimension_error(names_a, names_b)
+    return compile_time_return_hack(ret)
+end
+
 # The following are helpers for remaining_dimnames_from_indexing
 # as a generated function it can get unhappy if asked to use anon functions
 # and it can only call function declared before it. So we declare them explictly here.
@@ -222,7 +242,7 @@ is_noninteger_type(::Type{<:Integer}) = false
 is_noninteger_type(::Any) = true
 
 """
-    remaining_dimnames_from_indexing(dimnames::Tuple, inds...)
+    remaining_dimnames_from_indexing(dimnames::Tuple, inds)
 Given a tuple of dimension names
 and a set of index expressesion e.g `1, :, 1:3, [true, false]`,
 determine which are not dropped.
@@ -231,12 +251,22 @@ Dimensions indexed with scalars are dropped
 @generated function remaining_dimnames_from_indexing(dimnames::Tuple, inds)
     # 0-Allocation see:
     # `@btime (()->remaining_dimnames_from_indexing((:a, :b, :c), (:,390,:)))()``
-    ind_types = inds.parameters
-    kept_dims = findall(is_noninteger_type, ind_types)
-    keep_names = [:(getfield(dimnames, $ii)) for ii in kept_dims]
+    keep_names = []
+    dim_num = 0
+    for type in inds.parameters
+        if type <: Integer
+            dim_num += 1
+        elseif type <: CartesianIndex
+            dim_num += type.parameters[1]
+        elseif type == Array{CartesianIndex{0},1}
+            push!(keep_names, QuoteNode(:_))
+        else
+            dim_num += 1
+            push!(keep_names, :(getfield(dimnames, $dim_num)) )
+        end
+    end
     return Expr(:call, :compile_time_return_hack, Expr(:tuple, keep_names...))
 end
-
 
 """
     remaining_dimnames_after_dropping(dimnames::Tuple, dropped_dims)
